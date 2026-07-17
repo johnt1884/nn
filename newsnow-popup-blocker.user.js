@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NewsNow Popup Blocker & Scroll Restorer
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  Blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and interactivity.
+// @version      1.6
+// @description  Blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and interactivity with zero performance overhead.
 // @author       Jules
 // @match        *://*.newsnow.co.uk/*
 // @match        *://*.newsnow.com/*
@@ -13,7 +13,8 @@
 (function() {
     'use strict';
 
-    // 1. Inject CSS to hide popups, overlays, and backdrops instantly before they render
+    // 1. CSS-only hiding is extremely lightweight, instantaneous, and has absolutely zero performance overhead.
+    // CSS "!important" rules override inline styles and class-based styles applied by the page's scripts.
     const cssRules = `
         /* Hide membership popups and Sourcepoint consent overlays */
         .membership-main[type="popup"],
@@ -22,20 +23,31 @@
         div[class*="membership-auto-learn"],
         div[id^="sp_message_container_"],
         iframe[id^="sp_message_iframe_"],
-        .message-overlay {
+        .message-overlay,
+        [class*="message-overlay"] {
             display: none !important;
             visibility: hidden !important;
             opacity: 0 !important;
             pointer-events: none !important;
+            height: 0 !important;
+            width: 0 !important;
         }
 
-        /* Restore scrolling on html and body when blocked by consent/membership classes */
+        /* Restore scrolling on html and body when blocked by consent/membership classes/styles */
         html, body,
         html.sp-message-open, body.sp-message-open,
         html.no-scroll, body.no-scroll,
         html.modal-open, body.modal-open {
             overflow: auto !important;
+            overflow-y: auto !important;
             position: static !important;
+            height: auto !important;
+            width: auto !important;
+            margin-top: 0px !important;
+            top: auto !important;
+            left: auto !important;
+            right: auto !important;
+            background-color: initial;
         }
     `;
 
@@ -67,27 +79,17 @@
         console.error("Failed to inject CSS style", e);
     }
 
-    // Flag to prevent recursive loop inside cleanup from triggering MutationObserver
-    let isCleaning = false;
+    let observer = null;
 
-    // 2. Continuous cleanup function to restore scroll and remove blocking elements
+    // 2. Cleanup function to restore scroll and remove blocking elements.
+    // Temporarily disconnects the MutationObserver to guarantee absolutely zero recursive loops.
     function cleanup() {
-        if (isCleaning) return;
-        isCleaning = true;
+        // Disconnect observer synchronously to avoid hearing our own mutations
+        if (observer) {
+            observer.disconnect();
+        }
 
         try {
-            // Remove membership main elements
-            const popups = document.querySelectorAll('.membership-main, [class*="membership-main"], div[type="popup"]');
-            popups.forEach(el => {
-                el.remove();
-            });
-
-            // Remove Sourcepoint consent overlays/iframes if any
-            const containers = document.querySelectorAll('div[id^="sp_message_container_"], iframe[id^="sp_message_iframe_"], .message-overlay');
-            containers.forEach(el => {
-                el.remove();
-            });
-
             // Restore body/html scrolling and classes
             const docHtml = document.documentElement;
             const docBody = document.body;
@@ -96,10 +98,20 @@
                 if (docHtml.classList.contains('sp-message-open') || docHtml.classList.contains('modal-open') || docHtml.classList.contains('no-scroll')) {
                     docHtml.classList.remove('sp-message-open', 'modal-open', 'no-scroll');
                 }
+                if (docHtml.hasAttribute('data-previous-scroll-y')) {
+                    docHtml.removeAttribute('data-previous-scroll-y');
+                }
                 const htmlStyle = docHtml.getAttribute('style') || '';
-                if (htmlStyle.includes('overflow') || htmlStyle.includes('position')) {
+                if (htmlStyle.includes('overflow') || htmlStyle.includes('position') || htmlStyle.includes('margin-top')) {
                     docHtml.style.setProperty('overflow', 'auto', 'important');
+                    docHtml.style.setProperty('overflow-y', 'auto', 'important');
                     docHtml.style.setProperty('position', 'static', 'important');
+                    docHtml.style.setProperty('height', 'auto', 'important');
+                    docHtml.style.setProperty('width', 'auto', 'important');
+                    docHtml.style.setProperty('margin-top', '0px', 'important');
+                    docHtml.style.setProperty('top', 'auto', 'important');
+                    docHtml.style.setProperty('left', 'auto', 'important');
+                    docHtml.style.setProperty('right', 'auto', 'important');
                 }
             }
 
@@ -108,88 +120,65 @@
                     docBody.classList.remove('sp-message-open', 'modal-open', 'no-scroll');
                 }
                 const bodyStyle = docBody.getAttribute('style') || '';
-                if (bodyStyle.includes('overflow') || bodyStyle.includes('position')) {
+                if (bodyStyle.includes('overflow') || bodyStyle.includes('position') || bodyStyle.includes('margin-top')) {
                     docBody.style.setProperty('overflow', 'auto', 'important');
+                    docBody.style.setProperty('overflow-y', 'auto', 'important');
                     docBody.style.setProperty('position', 'static', 'important');
+                    docBody.style.setProperty('height', 'auto', 'important');
+                    docBody.style.setProperty('width', 'auto', 'important');
+                    docBody.style.setProperty('margin-top', '0px', 'important');
+                    docBody.style.setProperty('top', 'auto', 'important');
+                    docBody.style.setProperty('left', 'auto', 'important');
+                    docBody.style.setProperty('right', 'auto', 'important');
                 }
             }
         } catch (e) {
             console.error("Error during cleanup", e);
         } finally {
-            isCleaning = false;
+            // Reconnect the observer after safe execution
+            if (observer) {
+                setupObserverObservation();
+            }
         }
     }
 
-    // Run cleanup immediately on load / periodically
+    function setupObserverObservation() {
+        if (!observer) return;
+        if (document.documentElement) {
+            observer.observe(document.documentElement, {
+                attributes: true,
+                attributeFilter: ['class', 'style', 'data-previous-scroll-y']
+            });
+        }
+        if (document.body) {
+            observer.observe(document.body, {
+                attributes: true,
+                attributeFilter: ['class', 'style']
+            });
+        }
+    }
+
+    // 3. MutationObserver on html and body tags ONLY (no childList: true or subtree: true)
+    function setupObserver() {
+        observer = new MutationObserver((mutations) => {
+            cleanup();
+        });
+        setupObserverObservation();
+    }
+
+    // Run cleanup immediately on load / DOMContentLoaded
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', cleanup);
+        document.addEventListener('DOMContentLoaded', () => {
+            cleanup();
+            setupObserver();
+        });
     } else {
         cleanup();
+        setupObserver();
     }
     window.addEventListener('load', cleanup);
 
-    // 3. MutationObserver to handle dynamically added popups
-    function setupObserver() {
-        if (!document.documentElement) return;
-        const observer = new MutationObserver((mutations) => {
-            if (isCleaning) return;
-
-            // Check if any mutations are actually something we care about before cleaning up
-            let shouldClean = false;
-            for (let i = 0; i < mutations.length; i++) {
-                const mutation = mutations[i];
-                if (mutation.type === 'childList') {
-                    // Check if added nodes contain matching popup or container elements
-                    for (let j = 0; j < mutation.addedNodes.length; j++) {
-                        const node = mutation.addedNodes[j];
-                        if (node.nodeType === Node.ELEMENT_NODE) {
-                            if (node.matches && (
-                                node.matches('.membership-main, [class*="membership-main"], div[type="popup"], div[id^="sp_message_container_"], iframe[id^="sp_message_iframe_"], .message-overlay') ||
-                                node.querySelector('.membership-main, [class*="membership-main"], div[type="popup"], div[id^="sp_message_container_"], iframe[id^="sp_message_iframe_"], .message-overlay')
-                            )) {
-                                shouldClean = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (shouldClean) break;
-                } else if (mutation.type === 'attributes') {
-                    const target = mutation.target;
-                    // Only trigger if class or style on html/body is actually locking page scrolling
-                    if (target === document.documentElement || target === document.body) {
-                        const classes = target.classList;
-                        if (classes.contains('sp-message-open') || classes.contains('modal-open') || classes.contains('no-scroll')) {
-                            shouldClean = true;
-                            break;
-                        }
-                        const styleStr = target.getAttribute('style') || '';
-                        if (styleStr.includes('overflow: hidden') || styleStr.includes('position: fixed') || styleStr.includes('overflow') || styleStr.includes('position')) {
-                            shouldClean = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (shouldClean) {
-                cleanup();
-            }
-        });
-
-        observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['class', 'style']
-        });
-    }
-
-    if (document.documentElement) {
-        setupObserver();
-    } else {
-        document.addEventListener('DOMContentLoaded', setupObserver);
-    }
-
-    // 4. Periodic interval backup to ensure nothing is missed (but with longer delay to reduce load)
-    setInterval(cleanup, 1000);
+    // 4. Low-frequency periodic backup interval to catch edge cases
+    setInterval(cleanup, 1500);
 
 })();
