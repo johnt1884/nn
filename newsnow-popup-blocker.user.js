@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NewsNow Popup Blocker & Scroll Restorer
 // @namespace    http://tampermonkey.net/
-// @version      1.6
-// @description  Blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and interactivity with zero performance overhead.
+// @version      1.7
+// @description  Instantly blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and interactivity using zero-overhead declarative CSS.
 // @author       Jules
 // @match        *://*.newsnow.co.uk/*
 // @match        *://*.newsnow.com/*
@@ -13,10 +13,11 @@
 (function() {
     'use strict';
 
-    // 1. CSS-only hiding is extremely lightweight, instantaneous, and has absolutely zero performance overhead.
-    // CSS "!important" rules override inline styles and class-based styles applied by the page's scripts.
+    // 1. Declarative CSS-only overrides.
+    // This is 100% immune to JS infinite loops/page hangs because it does not modify DOM attributes or trigger page MutationObservers.
+    // CSS !important rules completely bypass inline styles and class-based scroll-locking applied by the site's scripts.
     const cssRules = `
-        /* Hide membership popups and Sourcepoint consent overlays */
+        /* Hide membership popups, overlays, and backdrops instantly before they can draw/dim the page */
         .membership-main[type="popup"],
         .membership-main,
         div[class*="membership-main"],
@@ -24,7 +25,9 @@
         div[id^="sp_message_container_"],
         iframe[id^="sp_message_iframe_"],
         .message-overlay,
-        [class*="message-overlay"] {
+        [class*="message-overlay"],
+        .overlay,
+        .overlay__shade {
             display: none !important;
             visibility: hidden !important;
             opacity: 0 !important;
@@ -33,11 +36,17 @@
             width: 0 !important;
         }
 
-        /* Restore scrolling on html and body when blocked by consent/membership classes/styles */
+        /* Override dimming/shading overlay backgrounds */
+        .overlay, .overlay__shade {
+            background: none !important;
+            background-color: transparent !important;
+        }
+
+        /* Completely unlock scrolling on both html and body tags */
+        /* By forcing position: static, top: auto, and overflow: auto, we completely neutralize */
+        /* any inline styles or classes (like sp-message-open) that freeze the scrollbar. */
         html, body,
-        html.sp-message-open, body.sp-message-open,
-        html.no-scroll, body.no-scroll,
-        html.modal-open, body.modal-open {
+        html[class], body[class] {
             overflow: auto !important;
             overflow-y: auto !important;
             position: static !important;
@@ -47,7 +56,6 @@
             top: auto !important;
             left: auto !important;
             right: auto !important;
-            background-color: initial;
         }
     `;
 
@@ -79,106 +87,32 @@
         console.error("Failed to inject CSS style", e);
     }
 
-    let observer = null;
-
-    // 2. Cleanup function to restore scroll and remove blocking elements.
-    // Temporarily disconnects the MutationObserver to guarantee absolutely zero recursive loops.
-    function cleanup() {
-        // Disconnect observer synchronously to avoid hearing our own mutations
-        if (observer) {
-            observer.disconnect();
-        }
-
+    // 2. Safe, non-intrusive cleanup function to remove hidden elements from the DOM.
+    // Note: We do NOT touch the classes or style attributes of html/body using JavaScript here.
+    // This completely prevents back-and-forth "style wars" with the page's scripts.
+    function cleanupDOM() {
         try {
-            // Restore body/html scrolling and classes
-            const docHtml = document.documentElement;
-            const docBody = document.body;
+            // Remove membership popup elements
+            const popups = document.querySelectorAll('.membership-main, [class*="membership-main"], div[type="popup"]');
+            popups.forEach(el => el.remove());
 
-            if (docHtml) {
-                if (docHtml.classList.contains('sp-message-open') || docHtml.classList.contains('modal-open') || docHtml.classList.contains('no-scroll')) {
-                    docHtml.classList.remove('sp-message-open', 'modal-open', 'no-scroll');
-                }
-                if (docHtml.hasAttribute('data-previous-scroll-y')) {
-                    docHtml.removeAttribute('data-previous-scroll-y');
-                }
-                const htmlStyle = docHtml.getAttribute('style') || '';
-                if (htmlStyle.includes('overflow') || htmlStyle.includes('position') || htmlStyle.includes('margin-top')) {
-                    docHtml.style.setProperty('overflow', 'auto', 'important');
-                    docHtml.style.setProperty('overflow-y', 'auto', 'important');
-                    docHtml.style.setProperty('position', 'static', 'important');
-                    docHtml.style.setProperty('height', 'auto', 'important');
-                    docHtml.style.setProperty('width', 'auto', 'important');
-                    docHtml.style.setProperty('margin-top', '0px', 'important');
-                    docHtml.style.setProperty('top', 'auto', 'important');
-                    docHtml.style.setProperty('left', 'auto', 'important');
-                    docHtml.style.setProperty('right', 'auto', 'important');
-                }
-            }
-
-            if (docBody) {
-                if (docBody.classList.contains('sp-message-open') || docBody.classList.contains('modal-open') || docBody.classList.contains('no-scroll')) {
-                    docBody.classList.remove('sp-message-open', 'modal-open', 'no-scroll');
-                }
-                const bodyStyle = docBody.getAttribute('style') || '';
-                if (bodyStyle.includes('overflow') || bodyStyle.includes('position') || bodyStyle.includes('margin-top')) {
-                    docBody.style.setProperty('overflow', 'auto', 'important');
-                    docBody.style.setProperty('overflow-y', 'auto', 'important');
-                    docBody.style.setProperty('position', 'static', 'important');
-                    docBody.style.setProperty('height', 'auto', 'important');
-                    docBody.style.setProperty('width', 'auto', 'important');
-                    docBody.style.setProperty('margin-top', '0px', 'important');
-                    docBody.style.setProperty('top', 'auto', 'important');
-                    docBody.style.setProperty('left', 'auto', 'important');
-                    docBody.style.setProperty('right', 'auto', 'important');
-                }
-            }
+            // Remove Sourcepoint consent overlays/iframes
+            const containers = document.querySelectorAll('div[id^="sp_message_container_"], iframe[id^="sp_message_iframe_"], .message-overlay, [class*="message-overlay"]');
+            containers.forEach(el => el.remove());
         } catch (e) {
-            console.error("Error during cleanup", e);
-        } finally {
-            // Reconnect the observer after safe execution
-            if (observer) {
-                setupObserverObservation();
-            }
+            console.error("Error during DOM cleanup", e);
         }
     }
 
-    function setupObserverObservation() {
-        if (!observer) return;
-        if (document.documentElement) {
-            observer.observe(document.documentElement, {
-                attributes: true,
-                attributeFilter: ['class', 'style', 'data-previous-scroll-y']
-            });
-        }
-        if (document.body) {
-            observer.observe(document.body, {
-                attributes: true,
-                attributeFilter: ['class', 'style']
-            });
-        }
-    }
-
-    // 3. MutationObserver on html and body tags ONLY (no childList: true or subtree: true)
-    function setupObserver() {
-        observer = new MutationObserver((mutations) => {
-            cleanup();
-        });
-        setupObserverObservation();
-    }
-
-    // Run cleanup immediately on load / DOMContentLoaded
+    // Run DOM node cleanup safely on DOMContentLoaded and Load
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
-            cleanup();
-            setupObserver();
-        });
+        document.addEventListener('DOMContentLoaded', cleanupDOM);
     } else {
-        cleanup();
-        setupObserver();
+        cleanupDOM();
     }
-    window.addEventListener('load', cleanup);
+    window.addEventListener('load', cleanupDOM);
 
-    // 4. Low-frequency periodic backup interval to catch edge cases
-    setInterval(cleanup, 1500);
+    // We do NOT use MutationObservers on style/class attributes, nor setInterval timers that modify attributes.
+    // This guarantees the main thread remains completely free and the page load never hangs.
 
 })();
