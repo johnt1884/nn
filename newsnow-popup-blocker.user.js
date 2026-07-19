@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NewsNow Popup Blocker & Scroll Restorer
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  Instantly blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and mouse-wheel interactivity.
 // @author       Jules
 // @match        *://*.newsnow.co.uk/*
@@ -13,25 +13,42 @@
 (function() {
     'use strict';
 
-    // 1. Prevent event-preventing scroll-blocking scripts from hijacking mousewheel / touchpad scrolling.
-    // Webpages often call `event.preventDefault()` on 'wheel', 'mousewheel', 'touchmove', or keypress events to lock scrolling.
-    // By wrapping Event.prototype.preventDefault and making it a no-op for scroll/wheel events, we guarantee standard mouse-wheel scrolling continues to work.
-    try {
-        const originalPreventDefault = Event.prototype.preventDefault;
-        Event.prototype.preventDefault = function() {
-            if (this && (
-                this.type === 'wheel' ||
-                this.type === 'mousewheel' ||
-                this.type === 'DOMMouseScroll' ||
-                this.type === 'touchmove'
-            )) {
-                // Ignore preventDefault() calls on scroll and wheel events to keep native scrolling enabled!
-                return;
+    // 1. Webpages execute scroll-blocking scripts in the main window context.
+    // Standard userscript isolation may prevent our Event.prototype modifications from reaching the page's scripts.
+    // By injecting a <script> element directly into the DOM context, we ensure Event.prototype.preventDefault
+    // is successfully overridden for the page's actual scripts, completely neutralizing their attempts to prevent mouse-wheel/touchpad scroll events!
+    const injectionCode = `
+        (function() {
+            try {
+                const originalPreventDefault = Event.prototype.preventDefault;
+                Event.prototype.preventDefault = function() {
+                    if (this && (
+                        this.type === 'wheel' ||
+                        this.type === 'mousewheel' ||
+                        this.type === 'DOMMouseScroll' ||
+                        this.type === 'touchmove' ||
+                        this.type === 'keydown' ||
+                        this.type === 'keyup'
+                    )) {
+                        // Ignore preventDefault() calls on scroll, wheel, and keypress events to keep native scrolling enabled!
+                        return;
+                    }
+                    return originalPreventDefault.apply(this, arguments);
+                };
+            } catch (e) {
+                console.error("Failed to override Event.prototype.preventDefault in page context", e);
             }
-            return originalPreventDefault.apply(this, arguments);
-        };
+        })();
+    `;
+
+    try {
+        const script = document.createElement('script');
+        script.textContent = injectionCode;
+        // Inject as early as possible on document-start
+        (document.head || document.documentElement).appendChild(script);
+        script.remove(); // Clean up script tag after execution
     } catch (e) {
-        console.error("Failed to override Event.prototype.preventDefault", e);
+        console.error("Failed to inject event override script", e);
     }
 
     // 2. Declarative CSS-only overrides.
@@ -117,7 +134,7 @@
 
             // Remove Sourcepoint consent overlays/iframes
             const containers = document.querySelectorAll('div[id^="sp_message_container_"], iframe[id^="sp_message_iframe_"], .message-overlay, [class*="message-overlay"]');
-            containers.forEach(el => containers.forEach(el => el.remove()));
+            containers.forEach(el => el.remove());
         } catch (e) {
             console.error("Error during DOM cleanup", e);
         }
