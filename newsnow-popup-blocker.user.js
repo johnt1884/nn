@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NewsNow Popup Blocker & Scroll Restorer
 // @namespace    http://tampermonkey.net/
-// @version      1.7
-// @description  Instantly blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and interactivity using zero-overhead declarative CSS.
+// @version      1.8
+// @description  Instantly blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and mouse-wheel interactivity.
 // @author       Jules
 // @match        *://*.newsnow.co.uk/*
 // @match        *://*.newsnow.com/*
@@ -13,7 +13,28 @@
 (function() {
     'use strict';
 
-    // 1. Declarative CSS-only overrides.
+    // 1. Prevent event-preventing scroll-blocking scripts from hijacking mousewheel / touchpad scrolling.
+    // Webpages often call `event.preventDefault()` on 'wheel', 'mousewheel', 'touchmove', or keypress events to lock scrolling.
+    // By wrapping Event.prototype.preventDefault and making it a no-op for scroll/wheel events, we guarantee standard mouse-wheel scrolling continues to work.
+    try {
+        const originalPreventDefault = Event.prototype.preventDefault;
+        Event.prototype.preventDefault = function() {
+            if (this && (
+                this.type === 'wheel' ||
+                this.type === 'mousewheel' ||
+                this.type === 'DOMMouseScroll' ||
+                this.type === 'touchmove'
+            )) {
+                // Ignore preventDefault() calls on scroll and wheel events to keep native scrolling enabled!
+                return;
+            }
+            return originalPreventDefault.apply(this, arguments);
+        };
+    } catch (e) {
+        console.error("Failed to override Event.prototype.preventDefault", e);
+    }
+
+    // 2. Declarative CSS-only overrides.
     // This is 100% immune to JS infinite loops/page hangs because it does not modify DOM attributes or trigger page MutationObservers.
     // CSS !important rules completely bypass inline styles and class-based scroll-locking applied by the site's scripts.
     const cssRules = `
@@ -87,9 +108,7 @@
         console.error("Failed to inject CSS style", e);
     }
 
-    // 2. Safe, non-intrusive cleanup function to remove hidden elements from the DOM.
-    // Note: We do NOT touch the classes or style attributes of html/body using JavaScript here.
-    // This completely prevents back-and-forth "style wars" with the page's scripts.
+    // 3. Safe, non-intrusive cleanup function to remove hidden elements from the DOM.
     function cleanupDOM() {
         try {
             // Remove membership popup elements
@@ -98,7 +117,7 @@
 
             // Remove Sourcepoint consent overlays/iframes
             const containers = document.querySelectorAll('div[id^="sp_message_container_"], iframe[id^="sp_message_iframe_"], .message-overlay, [class*="message-overlay"]');
-            containers.forEach(el => el.remove());
+            containers.forEach(el => containers.forEach(el => el.remove()));
         } catch (e) {
             console.error("Error during DOM cleanup", e);
         }
@@ -111,8 +130,5 @@
         cleanupDOM();
     }
     window.addEventListener('load', cleanupDOM);
-
-    // We do NOT use MutationObservers on style/class attributes, nor setInterval timers that modify attributes.
-    // This guarantees the main thread remains completely free and the page load never hangs.
 
 })();
