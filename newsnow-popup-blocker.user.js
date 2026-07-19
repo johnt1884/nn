@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         NewsNow Popup Blocker & Scroll Restorer
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  Instantly blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and mouse-wheel interactivity by neutralizing dynamic scroll locks.
+// @version      2.1
+// @description  Instantly blocks membership popups and consent dialogs on NewsNow pages and restores scrolling and mouse-wheel interactivity.
 // @author       Jules
 // @match        *://*.newsnow.co.uk/*
 // @match        *://*.newsnow.com/*
@@ -13,18 +13,42 @@
 (function() {
     'use strict';
 
-    // 1. Webpages execute scroll-locking scripts in the main window context.
-    // They dynamically set classes like 'sp-message-open' or assign inline styles:
-    // `overflow: hidden !important; position: fixed !important; top: 0px !important;`
-    //
-    // By injecting a script directly into the main window context, we:
-    // A) Override Event.prototype.preventDefault to prevent wheel/scroll cancellations.
-    // B) Intercept and reject any attempts to set `overflow: hidden` or `position: fixed` on HTML/Body.
-    // C) Override setAttribute / classList methods on HTML/Body to completely ignore scroll-locking classes.
+    // 1. Injected Main-Context Script to completely neutralize scroll-blocking APIs.
+    // This script runs inside the page's actual window/unsafe scope before any other scripts execute.
     const injectionCode = `
         (function() {
             try {
-                // A) Ignore preventDefault() calls on scroll and wheel events to keep native scrolling enabled!
+                // Track user interactions to safely distinguish user-initiated scrolls (like clicking "back to top") from script-initiated locks
+                let lastUserInteractionTime = 0;
+                ['click', 'keydown', 'mousedown', 'touchstart'].forEach(type => {
+                    window.addEventListener(type, () => {
+                        lastUserInteractionTime = Date.now();
+                    }, { passive: true, capture: true });
+                });
+
+                function isUserInitiated() {
+                    if (navigator.userActivation && navigator.userActivation.isActive) {
+                        return true;
+                    }
+                    return (Date.now() - lastUserInteractionTime) < 1000;
+                }
+
+                // A) Force all scroll/wheel event listeners to be passive so they cannot prevent scrolling
+                const originalAddEventListener = EventTarget.prototype.addEventListener;
+                EventTarget.prototype.addEventListener = function(type, listener, options) {
+                    if (type === 'wheel' || type === 'mousewheel' || type === 'DOMMouseScroll' || type === 'touchmove') {
+                        if (options === undefined || options === null) {
+                            options = { passive: true };
+                        } else if (typeof options === 'boolean') {
+                            options = { capture: options, passive: true };
+                        } else if (typeof options === 'object') {
+                            options.passive = true;
+                        }
+                    }
+                    return originalAddEventListener.call(this, type, listener, options);
+                };
+
+                // B) Neutralize Event.prototype.preventDefault on wheel, scroll, touch and keyboard events
                 const originalPreventDefault = Event.prototype.preventDefault;
                 Event.prototype.preventDefault = function() {
                     if (this && (
@@ -40,14 +64,73 @@
                     return originalPreventDefault.apply(this, arguments);
                 };
 
-                // B) Intercept and reject style setters that lock scrollbars or fix position
+                // C) Reject direct scroll event-handler property setters (e.g. window.onwheel = function...)
+                ['onwheel', 'onmousewheel', 'ontouchmove', 'onscroll'].forEach(prop => {
+                    try {
+                        Object.defineProperty(window, prop, {
+                            configurable: true,
+                            get: function() { return null; },
+                            set: function() { return; }
+                        });
+                        Object.defineProperty(document, prop, {
+                            configurable: true,
+                            get: function() { return null; },
+                            set: function() { return; }
+                        });
+                        Object.defineProperty(HTMLElement.prototype, prop, {
+                            configurable: true,
+                            get: function() { return null; },
+                            set: function() { return; }
+                        });
+                    } catch (e) {}
+                });
+
+                // D) Neutralize vertical scrollTop/scrollTo lock resets unless user-initiated
+                const originalScrollTo = window.scrollTo;
+                window.scrollTo = function(x, y) {
+                    if (y === 0 || (typeof x === 'object' && x.top === 0)) {
+                        if (!isUserInitiated()) {
+                            return;
+                        }
+                    }
+                    return originalScrollTo.apply(this, arguments);
+                };
+
+                const originalScroll = window.scroll;
+                window.scroll = function(x, y) {
+                    if (y === 0 || (typeof x === 'object' && x.top === 0)) {
+                        if (!isUserInitiated()) {
+                            return;
+                        }
+                    }
+                    return originalScroll.apply(this, arguments);
+                };
+
+                const originalScrollTopDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop');
+                if (originalScrollTopDescriptor && originalScrollTopDescriptor.set) {
+                    Object.defineProperty(Element.prototype, 'scrollTop', {
+                        configurable: true,
+                        enumerable: true,
+                        get: originalScrollTopDescriptor.get,
+                        set: function(val) {
+                            if (val === 0 && (this === document.documentElement || this === document.body)) {
+                                if (!isUserInitiated()) {
+                                    return;
+                                }
+                            }
+                            originalScrollTopDescriptor.set.call(this, val);
+                        }
+                    });
+                }
+
+                // E) Intercept and reject style setters that lock scrollbars or fix position on HTML/Body
                 const originalSetProperty = CSSStyleDeclaration.prototype.setProperty;
                 CSSStyleDeclaration.prototype.setProperty = function(property, value, priority) {
                     const isHtmlOrBody = this.parentRule && (
                         this.parentRule.selectorText === 'html' ||
                         this.parentRule.selectorText === 'body'
                     ) || (
-                        this.parentRule === undefined // Direct element.style modifications
+                        this.parentRule === undefined
                     );
 
                     if (isHtmlOrBody) {
@@ -58,14 +141,12 @@
                             return;
                         }
                         if (property === 'top' || property === 'margin-top') {
-                            // Don't allow scripts to displace the page vertically
                             return;
                         }
                     }
                     return originalSetProperty.call(this, property, value, priority);
                 };
 
-                // Intercept direct property assignment e.g. element.style.overflow = 'hidden'
                 const originalOverflowDescriptor = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'overflow');
                 if (originalOverflowDescriptor && originalOverflowDescriptor.set) {
                     Object.defineProperty(CSSStyleDeclaration.prototype, 'overflow', {
@@ -96,16 +177,14 @@
                     });
                 }
 
-                // C) Intercept element attributes / classList additions
+                // F) Intercept element attributes / classList additions
                 const originalSetAttribute = Element.prototype.setAttribute;
                 Element.prototype.setAttribute = function(name, value) {
                     if (this === document.documentElement || this === document.body) {
                         if (name === 'class' && (value.includes('sp-message-open') || value.includes('no-scroll') || value.includes('modal-open'))) {
-                            // Remove locked class values before applying
                             value = value.replace('sp-message-open', '').replace('no-scroll', '').replace('modal-open', '');
                         }
                         if (name === 'style' && (value.includes('hidden') || value.includes('fixed'))) {
-                            // Strip hidden and fixed styles from html/body
                             value = value.replace(/overflow\\s*:\\s*hidden/gi, '')
                                          .replace(/position\\s*:\\s*fixed/gi, '')
                                          .replace(/top\\s*:\\s*[0-9a-zA-Z-.]+/gi, '')
@@ -118,7 +197,6 @@
                     return originalSetAttribute.call(this, name, value);
                 };
 
-                // Intercept DOMTokenList.prototype.add (e.g. document.body.classList.add('no-scroll'))
                 const originalClassListAdd = DOMTokenList.prototype.add;
                 DOMTokenList.prototype.add = function() {
                     const filteredArgs = [];
